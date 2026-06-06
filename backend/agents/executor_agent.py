@@ -12,28 +12,73 @@ async def executor_agent(state):
     new_audit_entries = []
     escalation_needed = False
     
+    # Track which tasks have been attempted
+    task_attempts = state.get("task_attempts", {})
+    
+    # Process ONE task at a time
     for t in tasks:
+        # Skip already completed or escalated tasks
         if t.status in ["done", "escalated"]:
             continue
-            
-        t.status = "in_progress"
-        await asyncio.sleep(random.uniform(0.3, 0.8))
         
-        # 30% failure chance
-        if random.random() < 0.3:
-            if retry_count < 2:
+        # Move backlog tasks to in_progress ONE AT A TIME
+        if t.status == "backlog":
+            t.status = "in_progress"
+            task_attempts[t.id] = 0
+            print(f"[EXECUTOR] Moving task '{t.title}' to IN PROGRESS")
+            return {
+                "tasks": tasks,
+                "audit_log": current_log,
+                "current_agent": "Executor",
+                "retry_count": retry_count,
+                "task_attempts": task_attempts,
+                "escalation_needed": state.get("escalation_needed", False)
+            }
+        
+        # Process in_progress tasks
+        if t.status == "in_progress":
+            print(f"[EXECUTOR] Processing task '{t.title}' (attempt {task_attempts.get(t.id, 0) + 1})...")
+            
+            # Short delay so UI can show task moving (not a full 2 seconds)
+            await asyncio.sleep(0.3)
+            
+            # Increment attempt counter
+            task_attempts[t.id] = task_attempts.get(t.id, 0) + 1
+            
+            # Fail rate: first task for person with most tasks gets guaranteed escalation path
+            # Others: 10% fail rate for realistic demo
+            task_index = tasks.index(t)
+            # Count tasks per owner
+            owner_task_count = sum(1 for x in tasks if x.owner == t.owner)
+            # Person with 2+ tasks: their second task has 70% fail rate to ensure escalation demo
+            is_overloaded_owner = owner_task_count >= 2
+            if is_overloaded_owner and task_index > 0 and task_attempts[t.id] <= 2:
+                fail_rate = 0.7
+            elif task_index == 0 and task_attempts[t.id] == 1:
+                fail_rate = 0.3
+            else:
+                fail_rate = 0.1
+            should_fail = random.random() < fail_rate
+            
+            if should_fail and task_attempts[t.id] < 3:
+                # Task failed but can retry
+                print(f"[EXECUTOR] Task '{t.title}' FAILED (attempt {task_attempts[t.id]}/3)")
                 entry = AuditEntry(
                     id=str(uuid.uuid4()),
                     timestamp=datetime.utcnow().isoformat(),
                     agent="Executor",
                     action=f"Execute {t.title}",
-                    input_summary="Execution attempt",
+                    input_summary=f"Execution attempt {task_attempts[t.id]}",
                     output_summary="Failed execution",
-                    reasoning="Switching to fallback strategy",
+                    reasoning="Switching to fallback strategy, will retry",
                     status="error"
                 )
                 new_audit_entries.append(entry)
-            else:
+                # Keep in in_progress for retry
+                
+            elif should_fail and task_attempts[t.id] >= 3:
+                # Task failed and max retries reached - ESCALATE
+                print(f"[EXECUTOR] Task '{t.title}' ESCALATED (max retries reached)")
                 t.status = "escalated"
                 escalation_needed = True
                 entry = AuditEntry(
@@ -41,35 +86,37 @@ async def executor_agent(state):
                     timestamp=datetime.utcnow().isoformat(),
                     agent="Executor",
                     action=f"Execute {t.title}",
-                    input_summary="Execution attempt",
-                    output_summary="Max retries reached",
-                    reasoning="Task escalated due to repeated failures",
+                    input_summary=f"Execution attempt {task_attempts[t.id]}",
+                    output_summary="Max retries reached - escalating to human",
+                    reasoning="Task escalated due to repeated failures after 3 attempts",
                     status="error"
                 )
                 new_audit_entries.append(entry)
-        else:
-            t.status = "done"
-            entry = AuditEntry(
-                id=str(uuid.uuid4()),
-                timestamp=datetime.utcnow().isoformat(),
-                agent="Executor",
-                action=f"Execute {t.title}",
-                input_summary="Execution attempt",
-                output_summary="Task completed successfully",
-                reasoning="All checks passed",
-                status="success"
-            )
-            new_audit_entries.append(entry)
+                
+            else:
+                # Task succeeded
+                print(f"[EXECUTOR] Task '{t.title}' COMPLETED")
+                t.status = "done"
+                entry = AuditEntry(
+                    id=str(uuid.uuid4()),
+                    timestamp=datetime.utcnow().isoformat(),
+                    agent="Executor",
+                    action=f"Execute {t.title}",
+                    input_summary=f"Execution attempt {task_attempts[t.id]}",
+                    output_summary="Task completed successfully",
+                    reasoning="All checks passed",
+                    status="success"
+                )
+                new_audit_entries.append(entry)
             
-    pending_tasks = any(t.status == "in_progress" for t in tasks)
-    new_retry_count = retry_count
-    if pending_tasks and retry_count < 2:
-        new_retry_count += 1
-        
+            # Return after processing ONE task so UI can update
+            break
+            
     return {
         "tasks": tasks,
         "audit_log": current_log + new_audit_entries,
         "current_agent": "Executor",
-        "retry_count": new_retry_count,
+        "retry_count": retry_count,
+        "task_attempts": task_attempts,
         "escalation_needed": state.get("escalation_needed", False) or escalation_needed
     }

@@ -1,5 +1,6 @@
 import uuid
 import random
+import os
 from datetime import datetime
 from models import Task, AuditEntry
 from services.gmail_service import send_task_assignment_email
@@ -15,6 +16,9 @@ OWNER_EMAILS = {
 
 # Sensible SLA hours per priority
 PRIORITY_SLA = {5: 24, 4: 48, 3: 72, 2: 120, 1: 168}
+
+# LLM plans dictionary (empty for rule-based planning)
+llm_plans = {}
 
 def planner_agent(state):
     tasks = state.get("tasks", [])
@@ -32,34 +36,6 @@ def planner_agent(state):
 
     new_entries = []
 
-    # Try Ollama planner (optional enhancement)
-    llm_plans = {}
-    try:
-        from utils.llm_factory import LLMFactory
-        from langchain_core.output_parsers import JsonOutputParser
-        from pydantic import BaseModel, Field
-        from typing import List
-
-        class TaskPlan(BaseModel):
-            id: str
-            iso_deadline: str
-            priority: int
-            sla_hours: int
-            critical_path: bool
-
-        class PlanExtraction(BaseModel):
-            plans: List[TaskPlan]
-
-        llm = LLMFactory.get_llm(provider="ollama", model="llama3")
-        parser = JsonOutputParser(pydantic_object=PlanExtraction)
-        tasks_info = "\n".join([f"ID:{t.id} Title:{t.title} Deadline:{t.deadline} Priority:{t.priority}" for t in tasks])
-        prompt = f"Plan these tasks, return JSON. Current time: 2025-09-12T00:00:00Z\n{tasks_info}\n{parser.get_format_instructions()}"
-        r = llm.invoke(prompt)
-        result = parser.parse(r.content)
-        llm_plans = {p["id"]: p for p in result["plans"]}
-    except Exception:
-        pass  # Fall through to rule-based planning
-
     for t in tasks:
         plan = llm_plans.get(t.id)
         if plan:
@@ -76,7 +52,7 @@ def planner_agent(state):
             t.description = f"[CRITICAL PATH] {t.description}"
 
         # Gmail notification
-        email_addr = OWNER_EMAILS.get(t.owner, "unknown@company.com")
+        email_addr = OWNER_EMAILS.get(t.owner, os.getenv("GMAIL_SENDER_EMAIL", "demo@missioncontrol.ai"))
         try:
             success, msg = send_task_assignment_email(t, email_addr)
         except Exception as e:

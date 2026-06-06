@@ -7,15 +7,28 @@ from datetime import datetime, timedelta
 
 SCOPES = ['https://www.googleapis.com/auth/calendar.events']
 
+# Cache the Calendar service to avoid rebuilding it for every event
+_calendar_service_cache = None
+
 def get_calendar_service():
+    global _calendar_service_cache
+    
+    # Return cached service if available
+    if _calendar_service_cache is not None:
+        return _calendar_service_cache
+    
     creds = None
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    token_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'token.json')
+    logging.info(f"Calendar looking for token at: {token_path}")
+    if os.path.exists(token_path):
+        creds = Credentials.from_authorized_user_file(token_path, SCOPES)
     
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
+                with open(token_path, 'w') as f:
+                    f.write(creds.to_json())
             except Exception as e:
                 logging.warning(f"Could not refresh Calendar token: {e}")
                 return None
@@ -25,6 +38,7 @@ def get_calendar_service():
             
     try:
         service = build('calendar', 'v3', credentials=creds, static_discovery=False)
+        _calendar_service_cache = service  # Cache the service
         return service
     except Exception as e:
         logging.error(f"Error building Calendar service: {e}")
@@ -32,8 +46,12 @@ def get_calendar_service():
 
 def create_task_event(task, owner_email):
     service = get_calendar_service()
+
+    # DEMO MODE: if no Calendar credentials, simulate success for demo purposes
     if not service:
-        return None, "Calendar service unavailable."
+        print(f"[CALENDAR DEMO] Simulating calendar event for task: {task.title}")
+        fake_link = f"https://calendar.google.com/calendar/r/eventedit?text={task.title.replace(' ', '+')}"
+        return fake_link, "Demo calendar event simulated"
     
     sender = os.getenv("GMAIL_SENDER_EMAIL")
     
